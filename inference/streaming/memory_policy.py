@@ -57,12 +57,12 @@ def _memory_info(device: torch.device) -> tuple[float | None, float | None]:
     return free / 1024**2, total / 1024**2
 
 
-def _original_layers(denoiser: torch.nn.Module, config) -> tuple[int, ...]:
+def _candidate_layers(denoiser: torch.nn.Module, config, total_mib: float | None = None) -> tuple[int, ...]:
     blocks = list(getattr(denoiser, "blocks", ()))
     if not blocks:
         return ()
-    # SlidingLocalSelfAttention subclasses BlockSparseSelfAttention, so use
-    # the concrete class name rather than isinstance on the base class.
+    if total_mib is not None and total_mib <= 16384:
+        return tuple(range(len(blocks)))
     if getattr(config, "is_hybrid_sliding", False):
         return tuple(
             index
@@ -100,7 +100,7 @@ def choose_stream_cache_offload(
     spatial_blocks = (height // 16 // 8) * (width // 16 // 8)
     free_mib, total_mib = _memory_info(device)
     estimated_no, estimated_offload = _estimate_peak(spatial_blocks)
-    original_layers = _original_layers(denoiser, config)
+    candidate_layers = _candidate_layers(denoiser, config, total_mib)
     is_base = not getattr(config, "is_hybrid_sliding", False)
     if is_base:
         # Conservative base estimate: retain the reference workspace floor,
@@ -185,7 +185,7 @@ def choose_stream_cache_offload(
     return StreamOffloadDecision(
         mode=mode,
         enabled=enabled,
-        layers=original_layers if enabled else (),
+        layers=candidate_layers if enabled else (),
         spatial_blocks=spatial_blocks,
         free_memory_mib=free_mib,
         total_memory_mib=total_mib,

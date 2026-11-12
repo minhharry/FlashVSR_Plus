@@ -51,18 +51,42 @@ def rope_angles_3d(
     return torch.cat(chunks, dim=-1)
 
 
+_ROPE_TRIG_CACHE: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_rope_cos_sin(
+    shape: tuple[int, int, int],
+    head_dim: int,
+    device: torch.device,
+    temporal_offset: int,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device_key = (device.type, device.index if device.index is not None else 0)
+    cache_key = (shape, head_dim, device_key, temporal_offset, dtype)
+    entry = _ROPE_TRIG_CACHE.get(cache_key)
+    if entry is None:
+        angles = rope_angles_3d(
+            shape, head_dim, device, temporal_offset=temporal_offset
+        )
+        cos = angles.cos().view(1, 1, angles.shape[0], -1).to(dtype=dtype)
+        sin = angles.sin().view(1, 1, angles.shape[0], -1).to(dtype=dtype)
+        entry = (cos, sin)
+        _ROPE_TRIG_CACHE[cache_key] = entry
+    return entry
+
+
 def apply_rope_3d(
     x: torch.Tensor,
     shape: tuple[int, int, int],
     *,
     temporal_offset: int = 0,
 ) -> torch.Tensor:
-    angles = rope_angles_3d(
-        shape, x.shape[-1], x.device, temporal_offset=temporal_offset
-    ).to(dtype=torch.float64)
-    x_float = x.to(torch.float64).reshape(*x.shape[:-1], -1, 2)
-    cos = angles.cos().view(1, 1, angles.shape[0], -1)
-    sin = angles.sin().view(1, 1, angles.shape[0], -1)
-    first, second = x_float[..., 0], x_float[..., 1]
-    rotated = torch.stack((first * cos - second * sin, second * cos + first * sin), dim=-1)
-    return rotated.flatten(-2).to(dtype=x.dtype)
+    cos, sin = _get_rope_cos_sin(
+        shape, x.shape[-1], x.device, temporal_offset, x.dtype
+    )
+    x_pairs = x.reshape(*x.shape[:-1], -1, 2)
+    first, second = x_pairs[..., 0], x_pairs[..., 1]
+    rotated = torch.empty_like(x_pairs)
+    rotated[..., 0] = first * cos - second * sin
+    rotated[..., 1] = second * cos + first * sin
+    return rotated.flatten(-2)

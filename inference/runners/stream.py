@@ -1,3 +1,4 @@
+# Modified: optional resident-input inference and reduced frame-transfer/copy overhead.
 from __future__ import annotations
 
 from typing import Callable
@@ -113,7 +114,7 @@ class StreamRunner(BaseRunner):
             raise TypeError("FlashVSR stream inference requires LQProjection.stream_forward")
         conditions = None
         if process_index == 0:
-            first = lq_video[:, :, :1].to(device=device, dtype=dtype)
+            first = lq_video[:, :, :1].to(device=device, dtype=dtype, non_blocking=True)
             conditions = self._append_conditions(
                 conditions, projection.stream_forward(first)
             )
@@ -123,7 +124,7 @@ class StreamRunner(BaseRunner):
             latent_index = process_index * chunk_latents + inner
             start = 1 + latent_index * TEMPORAL_DOWNSAMPLE - frame_offset
             end = start + TEMPORAL_DOWNSAMPLE
-            clip = lq_video[:, :, start:end].to(device=device, dtype=dtype)
+            clip = lq_video[:, :, start:end].to(device=device, dtype=dtype, non_blocking=True)
             conditions = self._append_conditions(
                 conditions, projection.stream_forward(clip)
             )
@@ -141,6 +142,7 @@ class StreamRunner(BaseRunner):
         progress: Callable[[str], None] | None = None,
         segment_writer=None,
         output_frame_limit: int | None = None,
+        padded_lq: torch.Tensor | None = None,
     ) -> RunnerOutput:
         input_stream = lq_video if isinstance(lq_video, TemporalVideoStream) else None
         if input_stream is not None:
@@ -186,6 +188,9 @@ class StreamRunner(BaseRunner):
             # live workspace during later sparse-mask and attention stages.
             # It does not alter any attention arithmetic or cache contents.
             release_attention_workspaces=True,
+            compact_cache=True,
+            reuse_host_cache=True,
+            fp8_cache=getattr(self.config, "fp8_kv", False),
             attention_cache_transfer_stream=(
                 torch.cuda.Stream(device=device)
                 if device.type == "cuda"
@@ -206,7 +211,21 @@ class StreamRunner(BaseRunner):
         # final incomplete region is aligned by repeating the last input frame.
         projection_frames = 1 + padded_latents * TEMPORAL_DOWNSAMPLE
         decoder_frames = padded_latents * TEMPORAL_DOWNSAMPLE - 3
-        projection_video = None if input_stream is not None else repeat_last_frame(lq_video, projection_frames)
+        if padded_lq is not None:
+            # The opt-in resident input owns a fully initialized repeated tail.
+            if (input_stream is not None or self.config.temporal_compression != 4
+                    or padded_lq.ndim != 5
+                    or padded_lq.shape[:2] != lq_video.shape[:2]
+                    or padded_lq.shape[-2:] != lq_video.shape[-2:]
+                    or padded_lq.device != lq_video.device
+                    or padded_lq.dtype != lq_video.dtype
+                    or padded_lq.shape[2] < projection_frames
+                    or padded_lq.untyped_storage().data_ptr() != lq_video.untyped_storage().data_ptr()
+                    or padded_lq.storage_offset() != lq_video.storage_offset()):
+                raise ValueError("padded_lq must own the TC4 input and its initialized repeated tail")
+            projection_video = padded_lq[:, :, :projection_frames]
+        else:
+            projection_video = None if input_stream is not None else repeat_last_frame(lq_video, projection_frames)
         decoder_video = None if input_stream is not None else projection_video[:, :, :decoder_frames]
         segment_color = None
         color_config = self.config.color_correction
@@ -242,6 +261,8 @@ class StreamRunner(BaseRunner):
         produced_frames = 0
         try:
             for process_index, projection_chunk, frame_offset, last_chunk in chunks:
+                if progress is not None:
+                    progress(f"DiT chunk {process_index + 1}/{process_count} starting (last_chunk={last_chunk})")
                 conditions = self._project_lq_chunk(
                     projection_chunk,
                     process_index,
@@ -371,6 +392,9 @@ class StreamRunner(BaseRunner):
                     else decoder_video[:, :, start:stop]
                 )
                 if decode_limit is None:
+                    _offload_dit(self.bundle, state, device)
+                    if progress is not None:
+                        progress("TinyDecoder decode() starting")
                     decoded = self.bundle.decoder.decode(
                         segment, lq_video=decoder_video, stream=True,
                     )
@@ -416,7 +440,7 @@ class StreamRunner(BaseRunner):
                 if input_stream is not None:
                     input_stream.release_before(stop)
                 del segment, decoded, decoder_lq, reference, segment_video
-            video = (None if segment_writer is not None else torch.cat(outputs, dim=2))
+            video = (None if segment_writer is not None else (outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=2)))
             outputs.clear()
             if progress is not None:
                 progress("TinyDecoder complete")

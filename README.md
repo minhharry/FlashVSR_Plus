@@ -1,3 +1,10 @@
+# FlashVSR_Plus
+
+Fork from https://github.com/OpenImagingLab/FlashVSR_Plus
+Perform some optimization to run inference on RTX 4070 (12GB VRAM) on Windows.
+Add `uv` for package manager.
+
+---
 <div align="center">
 
 <h1>⚡ FlashVSR+</h1>

@@ -1,5 +1,6 @@
 from .attention import AttentionRuntime, build_block_causal_mask
 from .attention_backends import attention_kernel_status
+from .fp8 import FP8Linear, quantize_model_fp8, quantize_kv_cache, dequantize_kv_cache
 from .config import (
     AttentionConfig,
     BlockReplacementConfig,
@@ -47,4 +48,8 @@ __all__ = [
     "attention_kernel_status",
     "WanVAE",
     "WanVAEEncoder",
+    "FP8Linear",
+    "quantize_model_fp8",
+    "quantize_kv_cache",
+    "dequantize_kv_cache",
 ]

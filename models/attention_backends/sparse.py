@@ -407,19 +407,23 @@ def build_stream_sparse_layout(
         batch, heads, -1, -1
     )
     if is_sparse:
-        q_pooled = q_windows.mean(dim=3, dtype=torch.float32)
-        k_pooled = k_windows.mean(dim=3, dtype=torch.float32)
-        scores = torch.einsum("bhqd,bhkd->bhqk", q_pooled, k_pooled)
-        scores = scores / math.sqrt(head_dim)
-        # The grouped selector ranks per-query softmax probabilities. Keep
-        # that exact ordering, but normalize in-place so logits and probs do
-        # not coexist as two full FP32 matrices on long 4K streams.
-        scores.masked_fill_(~candidates, -torch.inf)
-        scores.sub_(torch.logsumexp(scores, dim=-1, keepdim=True)).exp_()
-        grouped_temporal_blocks = temporal_windows // temporal_block_size
-        block_mask = _grouped_topk(
-            scores, candidates, grouped_temporal_blocks, topk
-        )
+        total_candidates = int(candidate_base.sum().item())
+        if total_candidates <= topk:
+            block_mask = candidates
+        else:
+            q_pooled = q_windows.mean(dim=3, dtype=torch.float32)
+            k_pooled = k_windows.mean(dim=3, dtype=torch.float32)
+            scores = torch.einsum("bhqd,bhkd->bhqk", q_pooled, k_pooled)
+            scores = scores / math.sqrt(head_dim)
+            # The grouped selector ranks per-query softmax probabilities. Keep
+            # that exact ordering, but normalize in-place so logits and probs do
+            # not coexist as two full FP32 matrices on long 4K streams.
+            scores.masked_fill_(~candidates, -torch.inf)
+            scores.sub_(torch.logsumexp(scores, dim=-1, keepdim=True)).exp_()
+            grouped_temporal_blocks = temporal_windows // temporal_block_size
+            block_mask = _grouped_topk(
+                scores, candidates, grouped_temporal_blocks, topk
+            )
     else:
         block_mask = candidates
     # Strict top-k uses ``score > threshold`` and can theoretically produce an

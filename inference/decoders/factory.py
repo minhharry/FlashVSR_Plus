@@ -20,4 +20,5 @@ def build_decoder(config: DecoderConfig, module):
         parallel=False,
         parallel_mode=config.tiny_decoder_parallel_mode,
         channels_last=config.tiny_decoder_channels_last,
+        chunk_latents=getattr(config, "tiny_decoder_chunk_latents", None),
     )

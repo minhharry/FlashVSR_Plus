@@ -44,6 +44,7 @@ class DecoderConfig:
     tiny_channels: tuple[int, ...] = (512, 256, 128, 128)
     tiny_latent_channels: int = 784
     tiny_decoder_parallel_mode: str = "auto"
+    tiny_decoder_chunk_latents: int | None = 2
     # Use NHWC storage for BF16 CUDA convolutions. This is mathematically
     # equivalent and can be disabled for strict contiguous-layout regression.
     tiny_decoder_channels_last: bool = True
@@ -152,6 +153,8 @@ class InferenceConfig:
     # faster for CUDA D2H/H2D transfers; disable only on systems that cannot
     # reserve enough pinned host memory.
     stream_cache_pin_memory: bool = True
+    fp8_weights: bool = False
+    fp8_kv: bool = False
 
     def validate(self) -> None:
         if isinstance(self.decoder, str):

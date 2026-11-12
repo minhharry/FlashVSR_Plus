@@ -233,6 +233,7 @@ class FlashVSRDiT(nn.Module):
                 stream_compact_cache=getattr(state, "compact_cache", False),
                 stream_write_cache=getattr(state, "write_cache", True),
                 stream_release_workspaces=getattr(state, "release_attention_workspaces", False),
+                stream_fp8_cache=getattr(state, "fp8_cache", False),
             )
             trace = state.memory_trace
             if trace is not None and x.is_cuda:
@@ -240,10 +241,12 @@ class FlashVSRDiT(nn.Module):
                     if value is None:
                         return {"tokens": 0, "bytes": 0, "device": None}
                     k, v = value
+                    k_t = k[0] if isinstance(k, (tuple, list)) else k
+                    v_t = v[0] if isinstance(v, (tuple, list)) else v
                     return {
-                        "tokens": int(k.shape[2]),
-                        "bytes": int(k.numel() * k.element_size() + v.numel() * v.element_size()),
-                        "device": str(k.device),
+                        "tokens": int(k_t.shape[2]),
+                        "bytes": int(k_t.numel() * k_t.element_size() + v_t.numel() * v_t.element_size()),
+                        "device": str(k_t.device),
                     }
 
                 before_cache = cache_stats(cache)
@@ -296,46 +299,52 @@ class FlashVSRDiT(nn.Module):
                 )
                 if transfer_stream is not None and current_stream is not None:
                     transfer_stream.wait_stream(current_stream)
-                for cache_index, value in enumerate(next_cache):
-                    value = value.detach()
+
+                def _offload_tensor(val, prev):
+                    nonlocal transfer_stream
+                    if not isinstance(val, torch.Tensor):
+                        return val
+                    val = val.detach()
                     if getattr(state, "attention_cache_pin_memory", True):
                         try:
-                            previous = None if cache is None else cache[cache_index]
                             if (
                                 getattr(state, "reuse_host_cache", False)
-                                and previous is not None
-                                and previous.device.type == "cpu"
-                                and previous.is_pinned()
-                                and previous.shape == value.shape
-                                and previous.dtype == value.dtype
+                                and prev is not None
+                                and isinstance(prev, torch.Tensor)
+                                and prev.device.type == "cpu"
+                                and prev.is_pinned()
+                                and prev.shape == val.shape
+                                and prev.dtype == val.dtype
                             ):
-                                # H2D consumption precedes block completion on
-                                # the compute stream. The transfer stream wait
-                                # above prevents overwriting a still-read source.
-                                host_value = previous
+                                host_val = prev
                             else:
-                                host_value = torch.empty_like(
-                                    value, device="cpu", pin_memory=True
+                                host_val = torch.empty_like(
+                                    val, device="cpu", pin_memory=True
                                 )
                             if transfer_stream is not None:
-                                value.record_stream(transfer_stream)
+                                val.record_stream(transfer_stream)
                                 with torch.cuda.stream(transfer_stream):
-                                    host_value.copy_(value, non_blocking=True)
+                                    host_val.copy_(val, non_blocking=True)
                             else:
-                                host_value.copy_(value, non_blocking=True)
+                                host_val.copy_(val, non_blocking=True)
                         except RuntimeError:
-                            # Gracefully fall back on systems with an
-                            # insufficient pinned-memory limit. Correctness
-                            # is unchanged; only transfer throughput degrades.
                             if transfer_stream is not None:
                                 transfer_stream.synchronize()
                                 transfer_stream = None
-                            # A failed pin allocation cannot be safely queued
-                            # on the transfer stream; fall back synchronously.
-                            host_value = value.to(device="cpu")
+                            host_val = val.to(device="cpu")
                     else:
-                        host_value = value.to(device="cpu")
-                    host_cache.append(host_value)
+                        host_val = val.to(device="cpu")
+                    return host_val
+
+                def _offload_entry(entry, prev_entry):
+                    if isinstance(entry, (tuple, list)):
+                        prev_list = prev_entry if isinstance(prev_entry, (tuple, list)) else [None] * len(entry)
+                        return type(entry)(_offload_entry(sub, p) for sub, p in zip(entry, prev_list))
+                    return _offload_tensor(entry, prev_entry)
+
+                for cache_index, entry in enumerate(next_cache):
+                    previous = None if cache is None else (cache[cache_index] if cache_index < len(cache) else None)
+                    host_cache.append(_offload_entry(entry, previous))
                 next_cache = tuple(host_cache)
                 ready_event = None
                 if transfer_stream is not None:

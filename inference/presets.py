@@ -46,6 +46,7 @@ def stream_config_for_mode(
     decode_every: int | str = "auto",
     tiny_decoder_mode: str = "auto",
     tiny_decoder_channels_last: bool = True,
+    tiny_decoder_chunk_latents: int | None = 2,
     offload_original_cache: bool = False,
     cache_offload_mode: str = "auto",
     temporal_compression: int = 4,
@@ -56,6 +57,9 @@ def stream_config_for_mode(
     color_correction: bool = False,
     color_correction_levels: int = 5,
     color_correction_chunk_size: int = 16,
+    fp8_weights: bool = False,
+    fp8_kv: bool = False,
+    stream_ffn_chunk_tokens: int | None = 15360,
 ) -> InferenceConfig:
     mode = validate_inference_mode(mode)
     use_turbo = mode == "turbo"
@@ -96,6 +100,7 @@ def stream_config_for_mode(
             kind="tiny",
             tiny_decoder_parallel_mode=tiny_decoder_mode,
             tiny_decoder_channels_last=tiny_decoder_channels_last,
+            tiny_decoder_chunk_latents=tiny_decoder_chunk_latents,
             decode_every=decode_every,
         ),
         color_correction=ColorCorrectionConfig(
@@ -112,4 +117,7 @@ def stream_config_for_mode(
         seed=seed,
         dtype="bf16",
         device=device,
+        fp8_weights=fp8_weights,
+        fp8_kv=fp8_kv,
+        stream_ffn_chunk_tokens=stream_ffn_chunk_tokens,
     )

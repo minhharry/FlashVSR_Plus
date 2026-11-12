@@ -37,6 +37,7 @@ class AttentionRuntime:
     stream_compact_cache: bool = False
     stream_write_cache: bool = True
     stream_release_workspaces: bool = False
+    stream_fp8_cache: bool = False
 
 
 class RMSNorm(nn.Module):
@@ -121,14 +122,18 @@ class DenseSelfAttention(nn.Module):
         )
         v = self._heads(self.v(x))
         if runtime.stream_cache is not None:
-            cache_k, cache_v = runtime.stream_cache
-            k = torch.cat([cache_k.to(k), k], dim=2)
-            v = torch.cat([cache_v.to(v), v], dim=2)
+            from .fp8 import dequantize_kv_cache
+            cache_k, cache_v = dequantize_kv_cache(runtime.stream_cache[0], runtime.stream_cache[1], k)
+            k = torch.cat([cache_k, k], dim=2)
+            v = torch.cat([cache_v, v], dim=2)
         output = run_attention(q, k, v, kernel=self.config.kernel)
         tokens_per_frame = height * width
         keep_frames = max(runtime.stream_cache_blocks, 1) * 2
         keep_tokens = min(k.shape[2], keep_frames * tokens_per_frame)
         next_cache = (k[:, :, -keep_tokens:].detach(), v[:, :, -keep_tokens:].detach())
+        if runtime.stream_fp8_cache and runtime.stream_write_cache:
+            from .fp8 import quantize_kv_cache
+            next_cache = quantize_kv_cache(next_cache[0], next_cache[1])
         output = output.transpose(1, 2).reshape(x.shape[0], x.shape[1], self.dim)
         return self.o(output), next_cache
 
@@ -216,9 +221,10 @@ class BlockSparseSelfAttention(DenseSelfAttention):
             # are no longer consumed by this inference-only path.
             del q, k, v
         if use_cache and runtime.stream_cache is not None:
-            cache_k, cache_v = runtime.stream_cache
-            k_windows = torch.cat([cache_k.to(k_windows), k_windows], dim=2)
-            v_windows = torch.cat([cache_v.to(v_windows), v_windows], dim=2)
+            from .fp8 import dequantize_kv_cache
+            cache_k, cache_v = dequantize_kv_cache(runtime.stream_cache[0], runtime.stream_cache[1], k_windows)
+            k_windows = torch.cat([cache_k, k_windows], dim=2)
+            v_windows = torch.cat([cache_v, v_windows], dim=2)
         spatial = grid_shape[1] * grid_shape[2]
         ratio = self.config.sparse.topk_ratio or 2.0
         topk = runtime.stream_topk
@@ -273,22 +279,15 @@ class BlockSparseSelfAttention(DenseSelfAttention):
         output = output.reshape(batch, heads, query_blocks, block_tokens, head_dim)
         output = reverse_heads(output, runtime.token_shape, window, padded_shape)
         next_cache = None
-        if use_cache and runtime.stream_write_cache and runtime.stream_compact_cache:
-            # The layout retains a contiguous suffix of complete temporal grids.
-            # Clone into compact storage: a view would retain the entire KV cat.
+        if use_cache and runtime.stream_write_cache:
             keep = layout.cache_indices.shape[2]
-            next_cache = tuple(
-                value[:, :, -keep:].detach().clone(memory_format=torch.contiguous_format)
-                for value in (k_windows, v_windows)
-            )
-        elif use_cache and runtime.stream_write_cache:
-            gather = layout.cache_indices[..., None, None].expand(
-                -1, -1, -1, block_tokens, head_dim
-            )
             next_cache = (
-                torch.gather(k_windows, 2, gather).detach(),
-                torch.gather(v_windows, 2, gather).detach(),
+                k_windows[:, :, -keep:].detach().clone(memory_format=torch.contiguous_format),
+                v_windows[:, :, -keep:].detach().clone(memory_format=torch.contiguous_format),
             )
+        if next_cache is not None and runtime.stream_fp8_cache and runtime.stream_write_cache:
+            from .fp8 import quantize_kv_cache
+            next_cache = quantize_kv_cache(next_cache[0], next_cache[1])
         output = output.transpose(1, 2).reshape(x.shape[0], x.shape[1], self.dim)
         return self.o(output), next_cache
 

@@ -29,3 +29,4 @@ class StreamState:
     reuse_host_cache: bool = False
     write_cache: bool = True
     release_attention_workspaces: bool = False
+    fp8_cache: bool = False

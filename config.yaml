@@ -1,0 +1,43 @@
+# FlashVSR+ Configuration
+# Hardware Profile: NVIDIA GeForce RTX 4070 (12GB VRAM), 64GB RAM, Windows 11
+
+defaults:
+  mode: "turbo"
+  height: 1536
+  width: 2560
+  temporal_compression: 4
+  decode_every: "auto"
+  cache_offload_mode: "auto"
+  hardware_profile: "auto"
+  attn_kernel: "auto"
+  device: "cuda:0"
+  seed: 1
+  tiny_decoder_mode: "auto"
+  tiny_decoder_channels_last: true
+  tiny_decoder_chunk_latents: 2
+  offload_original_cache: false
+  color_correction: false
+  color_correction_levels: 5
+  color_correction_chunk_size: 16
+  video_preset: "ultrafast"
+  fast_buffers: true
+  tensor_resize: true
+  resident_budget_gib: 4.0
+  fp8_weights: false
+  fp8_kv: false
+  stream_ffn_chunk_tokens: 15360
+
+paths:
+  prompt_tensor: "prompt_tensor/posi_prompt.pth"
+  ckpts_dir: "ckpts"
+  tiny_decoder: "ckpts/TCDecoder.ckpt"
+  turbo:
+    dit: "ckpts/turbo/dit.safetensors"
+    lq_proj_in: "ckpts/turbo/lq_proj_in.safetensors"
+  base:
+    dit: "ckpts/base/dit.safetensors"
+    lq_proj_in: "ckpts/base/lq_proj_in.safetensors"
+  v1:
+    dit: "ckpts/v1/dit.safetensors"
+    lq_proj_in: "ckpts/v1/lq_proj_in.safetensors"
+

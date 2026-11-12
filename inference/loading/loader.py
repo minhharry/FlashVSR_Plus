@@ -111,5 +111,8 @@ def build_model_bundle(
     dtype = dtype_from_name(config.dtype)
     device = torch.device(config.device)
     denoiser.to(device=device, dtype=dtype)
+    if getattr(config, "fp8_weights", False):
+        from models.fp8 import quantize_model_fp8
+        quantize_model_fp8(denoiser, compile_layers=False)
     decoder_module.to(device=device, dtype=dtype)
     return ModelBundle(denoiser, decoder, scheduler, _load_context(paths.context)).eval()
